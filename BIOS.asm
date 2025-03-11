@@ -90,7 +90,6 @@ ENDP SETUP_IVT
    ;                       SUBROUTINES - CRYPTOGRAPHY                      ;                         
    ;-----------------------------------------------------------------------;
 
-
    ;-----------------------------------------------------------------------;    
    ;                    RESET VECTOR - BIOS ENTRY POINT                    ;                       
    ;-----------------------------------------------------------------------;
@@ -121,19 +120,9 @@ PROC START
    SHL      AH,1
 
 ERR01:
-   MOV      AX,0xB800
-   MOV      ES,AX
-   XOR      DI,DI
-
-   MOV      WORD[ES:DI],0x0748
-   ADD      DI,2
-
-   MOV      WORD[ES:DI],0x0765
-   ADD      DI,2
-
-   JMP ERR01
+   HLT
 ENDP START
-   
+
    ;----- INT 11 ----------------------------------------------------------;
    ; EQUIPMENT ENUMERATION                                                 ;
    ;     THIS INTERRUPT ATTEMPTS TO DETERMINE WHICH OPTIONAL DEVICES ARE   ;
@@ -175,7 +164,7 @@ PROC INT_15
    ;-----------------------------------------------------------------------; 
 INT_15_1:
    IN       AL,PPI_PORT_B                 ; READ PORT 0x61 VALUE
-   AND      AL,NOT 08H                    ; CLEAR BIT 3 TO TURN ON MOTOR
+   AND      AL,0F7H                       ; CLEAR BIT 3 TO TURN ON MOTOR
    OUT      PPI_PORT_B,AL                 ; WRITE BACK TO PORT 0x61
    JMP      INT_15_END                    ; RETURN FROM INTERRUPT
    ;-----------------------------------------------------------------------;    

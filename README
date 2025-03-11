@@ -3,4 +3,6 @@
       This repository serves as a Proof of Concept (PoC) of establishing a      
          hardware root of trust on the original IBM PC. Bootloaders are         
    cryptographically verified and matched against stored signatures in FLASH    
-                memory. Yhi does not aim to be perfectly secure.                
+        memory. Yhi uses CRC32 for boot sector validation, and therefore        
+          does not provide any real security factor. This project only          
+                     serves as a theoretical demonstration.                     
