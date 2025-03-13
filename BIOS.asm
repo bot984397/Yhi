@@ -62,6 +62,54 @@ BIOS_SIGNATURE    EQU 0AAH
    ;                         SUBROUTINES - UTILITY                         ;                            
    ;-----------------------------------------------------------------------;
 
+PROC YHI_CHECK_BOOT_KEYS
+   MOV      AH,01H                        ; KEYBOARD STATUS
+   INT      16H
+   JZ       NO_KEYS
+   MOV      AH,00H                        ; READ KEY FROM BUFFER
+   INT      16H
+   CMP      AL,'S'
+   JE       CHECK_MODIFIERS               ; READ KEYBOARD MODIFIERS
+   CMP      AL,'s'
+   JNE      NO_KEYS
+CHECK_MODIFIERS:
+   MOV      AH,02H                        ; READ SHIFT STATUS
+   INT      16H
+   AND      AL,0CH                        ; MASK FOR CTRL AND ALT
+   CMP      AL,0CH                        ; BOTH PRESSED?
+   JE       GOT_KEY
+NO_KEYS:
+   CLC                                    ; CLEAR CARRY FLAG (NO KEY)
+   RET                                    ; RETURN TO CALLER
+GOT_KEY:
+   STC                                    ; SET CARRY FLAG (KEY DETECTED)
+   RET                                    ; RETURN TO CALLER
+ENDP YHI_CHECK_BOOT_KEYS
+
+PROC YHI_CHECK_FIRST_BOOT
+   ; CMP DWORD[ADMIN_PASSWORD_HASH], 0FFFFFFFFh
+   JE       FIRST_TIME_SETUP
+   RET
+FIRST_TIME_SETUP:
+   MOV      SI,OFFSET FIRST_BOOT_MSG
+   CALL     PRINT_STRING                  ; DISPLAY FIRST BOOT MESSAGE
+   MOV      SI,OFFSET PASSWORD_PROMPT
+   CALL     PRINT_STRING                  ; DISPLAY PASSWORD PROMPT
+   MOV      DI,OFFSET PASSWORD_BUFFER
+   CALL     GET_PASSWORD                  ; READ PASSWORD FROM USER
+   MOV      SI,OFFSET PASSWORD_BUFFER
+   CALL     HASH_PASSWORD                 ; HASH NEW PASSWORD (MD4)
+   ; MOV [ADMIN_PASSWORD_HASH],AX
+   ; MOV [ADMIN_PASSWORD_HASH+2],DX
+   ; MOV BYTE[SECUREBOOT_ENABLED],1
+   ; MOV BYTE[HASH_COUNT],0
+   MOV      SI,OFFSET SETUP_COMPLETE_MSG
+   CALL     PRINT_STRING                  ; PRINT COMPLETION MESSAGE
+   MOV      AH,00H                        ; WAIT FOR KEYPRESS
+   INT      16H
+   RET                                    ; RETURN TO CALLER
+ENDP YHI_CHECK_FIRST_BOOT
+
    ;-----------------------------------------------------------------------;    
    ;                      INTERRUPT VECTOR TABLE SETUP                     ;                        
    ;-----------------------------------------------------------------------;
@@ -118,6 +166,8 @@ PROC START
    SHR      AH,CL
    JC       ERR01
    SHL      AH,1
+
+   CALL     YHI_CHECK_BOOT_KEYS
 
 ERR01:
    HLT
@@ -324,6 +374,20 @@ INT_19_BOOT_SECURE:
 
 INT_19_BOOT_STANDARD:
 ENDP INT_19
+
+   ;----- INT 43 ----------------------------------------------------------;
+   ; SECUREBOOT INTERFACE                                                  ;
+   ;     THIS INTERRUPT PROVIDES SECUREBOOT FUNCTIONALITY                  ;
+   ; INPUT                                                                 ;
+   ;     (AH)=0   RETURN SECUREBOOT STATUS IN AL                           ;
+   ;     (AH)=1   ENROLL NEW BOOTSECTOR HASH                               ;
+   ;     (AH)=2   REMOVE BOOTSECTOR HASH                                   ;
+   ;     (AH)=3   LIST ENROLLED HASHES                                     ;
+   ;     (AH)=4   ENABLE/DISABLE SECUREBOOT                                ;
+   ;-----------------------------------------------------------------------;
+PROC INT_43
+   STI                                    ; ENABLE INTERRUPTS
+ENDP INT_43
 
    ;-----------------------------------------------------------------------;    
    ;                         POWER-ON RESET VECTOR                         ;                            
