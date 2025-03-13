@@ -29,13 +29,13 @@ PROC INIT_ROUTINE                         ; INITIALIZATION ROUTINE
    PUSH     CS                            ; SET UP DATA SEGMENT
    POP      DS
    CALL     INSTALL_INTERRUPT_HANDLERS    ; INSTALL INTERRUPT HANDLERS
-   MOV      SI,INIT_SUCCESS_MSG
-   CALL     PRINT_STRING
+   ;MOV      SI,INIT_SUCCESS_MSG
+   ;CALL     PRINT_STRING
    CLC                                    ; CLEAR CARRY FLAG - SUCCESS
    JMP      INIT_SUCCESS
 INIT_FAILED:
-   MOV      SI,INIT_FAIL_MSG
-   CALL     PRINT_STRING
+   ;MOV      SI,INIT_FAIL_MSG
+   ;CALL     PRINT_STRING
    STC                                    ; SET CARRY FLAG - FAILURE
 INIT_SUCCESS:
    POP      DS

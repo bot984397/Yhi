@@ -1,9 +1,12 @@
    ;-----------------------------------------------------------------------;    
-   ;           SECURE IBM 5150 BIOS IMPLEMENTATION - EXPERIMENTAL          ;             
+   ;          EXTENDED IBM 5150 BIOS IMPLEMENTATION - EXPERIMENTAL         ;             
    ;      CHANGE YHI_BOOT_SECURE IN DATA SECTION TO ENABLE SECURE BOOT     ;
    ;                                                                       ;
    ; AUTHOR:   VMX                                                         ;
    ; DATE:     10/03/2025                                                  ;
+   ;                                                                       ;
+   ; "Every byte is sacred, every byte is great.                           ;
+   ;  If a byte is wasted, God gets quite irate."                          ;
    ;-----------------------------------------------------------------------;
 
 [BITS 16]
@@ -18,6 +21,14 @@
    ;-----------------------------------------------------------------------;    
    ;                         CONSTANTS AND EQUATES                         ;                            
    ;-----------------------------------------------------------------------;
+SECTION .DATA
+
+%define ROM_SCAN_START  0C000H
+%define ROM_SCAN_END    0F000H
+%define ROM_SIGNATURE1  055H
+%define ROM_SIGNATURE2  0AAH
+%define ROM_SEGMENT_INC 080H
+
 PPI_PORT_A        EQU 60H
 PPI_PORT_B        EQU 61H
 PPI_PORT_C        EQU 62H
@@ -55,34 +66,49 @@ KBD_BUF_TAIL      DW ?                    ; POINTER TO TAIL OF BUFFER
 KBD_BUF           DW 16 DUP(?)            ; ROOM FOR 16 ENTRIES
 KBD_BUF_END       EQU KBD_BUF + 32        ; END OF KEYBOARD BUFFER
 
-YHI_BOOT_SECURE   EQU 01H
-BIOS_SIGNATURE    EQU 0AAH
+YHI_BOOT_SECURE   EQU 01H                 ; ENABLE/DISABLE SECUREBOOT
+BIOS_SIGNATURE    EQU 0AAH                ; BIOS SIGNATURE
+
+NETBOOT_PRESENT   DB 00H
+
+SECTION .TEXT
 
    ;-----------------------------------------------------------------------;    
    ;                         SUBROUTINES - UTILITY                         ;                            
    ;-----------------------------------------------------------------------;
 
+   ;----- CHECK BOOT KEYS -------------------------------------------------;
+   ; THIS ROUTINE CHECKS IF KEY COMBINATIONS ARE PRESSED                   ;
+   ; INPUT                                                                 ;
+   ;     NO REGISTERS                                                      ;
+   ; OUTPUT                                                                ;
+   ;     (AL)=0   NO KEYS FOUND                                            ;
+   ;     (AL)=1   SECUREBOOT MANAGER [CTRL+ALT+S]                          ;
+   ;     (AL)=2   NETBOOT MANAGER [CTRL+ALT+N]                             ;
+   ; NOTE                                                                  ;
+   ;     IF BOTH [S] and [N] are pressed with [CTRL+ALT], THE SECUREBOOT   ;
+   ;     INTERFACE TAKES PRIORITY.                                         ;
+   ;-----------------------------------------------------------------------;
 PROC YHI_CHECK_BOOT_KEYS
    MOV      AH,01H                        ; KEYBOARD STATUS
    INT      16H
    JZ       NO_KEYS
-   MOV      AH,00H                        ; READ KEY FROM BUFFER
-   INT      16H
-   CMP      AL,'S'
-   JE       CHECK_MODIFIERS               ; READ KEYBOARD MODIFIERS
-   CMP      AL,'s'
-   JNE      NO_KEYS
-CHECK_MODIFIERS:
    MOV      AH,02H                        ; READ SHIFT STATUS
    INT      16H
-   AND      AL,0CH                        ; MASK FOR CTRL AND ALT
-   CMP      AL,0CH                        ; BOTH PRESSED?
-   JE       GOT_KEY
+   TEST     AL,0CH                        ; ARE CTRL + ALT PRESSED?
+   JZ       NO_KEYS                       ; NO? EXIT
+   MOV      AH,00H                        ; READ KEY FROM BUFFER
+   INT      16H
+   AND      AL,0DFH                       ; CONVERT TO UPPERCASE
+   CMP      AL,'S'                        ; SECUREBOOT SEQUENCE
+   MOV      AL,1H
+   JE       CHECK_END
+   CMP      AL,'N'                        ; NETBOOT SEQUENCE
+   INC      AL
+   JE       CHECK_END
 NO_KEYS:
-   CLC                                    ; CLEAR CARRY FLAG (NO KEY)
-   RET                                    ; RETURN TO CALLER
-GOT_KEY:
-   STC                                    ; SET CARRY FLAG (KEY DETECTED)
+   XOR      AL,AL
+CHECK_END:
    RET                                    ; RETURN TO CALLER
 ENDP YHI_CHECK_BOOT_KEYS
 
@@ -91,24 +117,82 @@ PROC YHI_CHECK_FIRST_BOOT
    JE       FIRST_TIME_SETUP
    RET
 FIRST_TIME_SETUP:
-   MOV      SI,OFFSET FIRST_BOOT_MSG
-   CALL     PRINT_STRING                  ; DISPLAY FIRST BOOT MESSAGE
-   MOV      SI,OFFSET PASSWORD_PROMPT
-   CALL     PRINT_STRING                  ; DISPLAY PASSWORD PROMPT
-   MOV      DI,OFFSET PASSWORD_BUFFER
-   CALL     GET_PASSWORD                  ; READ PASSWORD FROM USER
-   MOV      SI,OFFSET PASSWORD_BUFFER
-   CALL     HASH_PASSWORD                 ; HASH NEW PASSWORD (MD4)
+   ;MOV      SI,FIRST_BOOT_MSG
+   ;CALL     PRINT_STRING                  ; DISPLAY FIRST BOOT MESSAGE
+   ;MOV      SI,PASSWORD_PROMPT
+   ;CALL     PRINT_STRING                  ; DISPLAY PASSWORD PROMPT
+   ;MOV      DI,PASSWORD_BUFFER
+   ;CALL     GET_PASSWORD                  ; READ PASSWORD FROM USER
+   ;MOV      SI,PASSWORD_BUFFER
+   ;CALL     HASH_PASSWORD                 ; HASH NEW PASSWORD (MD4)
    ; MOV [ADMIN_PASSWORD_HASH],AX
    ; MOV [ADMIN_PASSWORD_HASH+2],DX
    ; MOV BYTE[SECUREBOOT_ENABLED],1
    ; MOV BYTE[HASH_COUNT],0
-   MOV      SI,OFFSET SETUP_COMPLETE_MSG
-   CALL     PRINT_STRING                  ; PRINT COMPLETION MESSAGE
+   ;MOV      SI,SETUP_COMPLETE_MSG
+   ;CALL     PRINT_STRING                  ; PRINT COMPLETION MESSAGE
    MOV      AH,00H                        ; WAIT FOR KEYPRESS
    INT      16H
    RET                                    ; RETURN TO CALLER
 ENDP YHI_CHECK_FIRST_BOOT
+
+   ;----- ROM SCAN --------------------------------------------------------;
+   ; THIS ROUTINE SCANS THE C000:0000-F000:0000 SPACE FOR EXPANSION ROMS   ;
+   ; INPUT                                                                 ;
+   ;     NO REGISTERS                                                      ;
+   ; OUTPUT                                                                ;
+   ;     NO REGISTERS                                                      ;
+   ;     VARIABLES IN THE DATA SECTION ARE SET ACCORDINGLY                 ;
+   ;-----------------------------------------------------------------------;
+PROC ROM_SCAN
+   MOV      AX,ROM_SCAN_START             ; START AT C000:0000
+   MOV      ES,AX                         ; SEG: C000H
+   XOR      DI,DI                         ; OFF: 0000H
+ROM_SCAN_LOOP:
+   CMP      BYTE [ES:00H],ROM_SIGNATURE1  ; BYTE 1: 055H
+   JNE      ROM_SCAN_NEXT
+   CMP      BYTE [ES:01H],ROM_SIGNATURE2  ; BYTE 2: 0AAH
+   JNE      ROM_SCAN_NEXT
+   MOVZX    CX,BYTE[ES:02H]               ; GET ROM SIZE IN 512-BYTE BLOCKS
+   SHL      CX,01H                        ; CONVERT TO 256-BYTE BLOCKS
+   XOR      AL,AL
+   XOR      BX,BX
+ROM_SCAN_CHECKSUM_LOOP:
+   ADD      AL,BYTE[ES:BX]                ; COMPUTE CHECKSUM
+   INC      BX
+   LOOP     ROM_SCAN_CHECKSUM_LOOP
+   TEST     AL,AL                         ; ALL BYTES SHOULD SUM UP TO 0
+   JNZ      ROM_SCAN_NEXT                 ; SKIP ROM - INVALID CHECKSUM
+   PUSH     AX                            ; SAVE REGISTERS BEFORE FAR CALL
+   PUSH     BX
+   PUSH     CX
+   PUSH     DX
+   PUSH     SI
+   PUSH     DI
+   PUSH     BP
+   PUSH     DS
+   PUSHF
+   CALL     FAR[ES:03H]                   ; FAR CALL TO ROM INIT FUNCTION
+   CMP      AX,'BN'                       ; NETBOOT EXPANSION ROM
+   JNE      ROM_SCAN_CONT                 ; NO? CONTINUE
+   MOV      BYTE[NETBOOT_PRESENT],01H     ; SET VARIABLE ACCORDINGLY
+ROM_SCAN_CONT:
+   POP      DS                            ; RESTORE REGISTERS AFTER FAR CALL
+   POP      BP
+   POP      DI
+   POP      SI
+   POP      DX
+   POP      CX
+   POP      BX
+   POP      AX
+ROM_SCAN_NEXT:
+   MOV      AX,ES                         ; MOVE TO NEXT 2KB BOUNDARY
+   ADD      AX,ROM_SEGMENT_INC            ; ADD 2KB (80H PARAGRAPHS)
+   MOV      ES,AX
+   CMP      AX,ROM_SCAN_END               ; CHECK IF WE'VE REACHED THE END
+   JB       ROM_SCAN_LOOP
+   RET                                    ; RETURN TO CALLER
+ENDP ROM_SCAN
 
    ;-----------------------------------------------------------------------;    
    ;                      INTERRUPT VECTOR TABLE SETUP                     ;                        
@@ -117,20 +201,15 @@ PROC SETUP_IVT
    XOR      AX,AX
    MOV      ES,AX
 
-   ; INT 10H - VIDEO SERVICES
-   ;MOV      WORD[ES:10H*4], INT_10
+   MOV      WORD[ES:10H*4], INT_10        ; INT 10H - VIDEO SERVICES
    MOV      WORD[ES:10H*4+2], 0F000H
-   ; INT 13H - DISK SERVICES
-   ;MOV      WORD[ES:13H*4], INT_13
+   MOV      WORD[ES:13H*4], INT_13        ; INT 13H - DISK SERVICES
    MOV      WORD[ES:13H*4+2], 0F000H
-   ; INT 16H - KEYBOARD SERVICES
-   MOV      WORD[ES:16H*4], INT_16
+   MOV      WORD[ES:16H*4], INT_16        ; INT 16H - KEYBOARD SERVICES
    MOV      WORD[ES:16H*4+2], 0F000H
-   ; INT 18H - ROM BASIC
-   ;MOV      WORD[ES:18H*4], INT_18
+   MOV      WORD[ES:18H*4], INT_18        ; INT 18H - ROM BASIC
    MOV      WORD[ES:18H*4+2], 0F000H
-   ; INT 19H - BOOTSTRAP LOADER
-   MOV      WORD[ES:19H*4], INT_19
+   MOV      WORD[ES:19H*4], INT_19        ; INT 19H - BOOTSTRAP LOADER
    MOV      WORD[ES:19H*4+2], 0F000H
 ENDP SETUP_IVT
 
@@ -167,10 +246,26 @@ PROC START
    JC       ERR01
    SHL      AH,1
 
-   CALL     YHI_CHECK_BOOT_KEYS
+   HLT
 
+   CALL     YHI_CHECK_BOOT_KEYS           ; CHECK FOR SECUREBOOT / NETBOOT
+   TEST     AL,AL                         ; (AL)=0 - NO SEQUENCE
+   JE       NO_SEQUENCE
+   DEC      AL                            ; (AL)=1 - SECUREBOOT SEQUENCE
+   JE       SECUREBOOT_SEQUENCE
+   DEC      AL                            ; (AL)=2 - NETBOOT SEQUENCE
+   JE       NETBOOT_SEQUENCE
+   JMP      NO_SEQUENCE
+SECUREBOOT_SEQUENCE:
+   ;CALL     SECUREBOOT_INTERFACE
+   JMP      NO_SEQUENCE
+NETBOOT_SEQUENCE:
+   ;CALL     NETBOOT_INTERFACE
+   JMP      NO_SEQUENCE
+NO_SEQUENCE:
 ERR01:
    HLT
+   JMP      ERR01
 ENDP START
 
    ;----- INT 11 ----------------------------------------------------------;
@@ -392,15 +487,15 @@ ENDP INT_43
    ;-----------------------------------------------------------------------;    
    ;                         POWER-ON RESET VECTOR                         ;                            
    ;-----------------------------------------------------------------------; 
-   TIMES 01FF0H-($-$$) DB 0 ; PAD TO F000:FFF0
+   TIMES 01FF0H-($-$$) DB 0               ; PAD TO F000:FFF0
 
 RESET_VECTOR:
-   JMP   0F000H:START
-   DB    '03/09/25'
+   JMP      0F000H:START
+   DB       '03/09/25'
 
    ;-----------------------------------------------------------------------;    
    ;                             ROM SIGNATURE                             ;                                
    ;-----------------------------------------------------------------------;
-   TIMES 02000H-1-($-$$) DB 0 ; PAD TO F000:FFFF
+   TIMES 02000H-1-($-$$) DB 0             ; PAD TO F000:FFFF
    DB BIOS_SIGNATURE
 
