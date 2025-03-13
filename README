@@ -20,3 +20,8 @@
    The network boot component is implemented as an optional expansion ROM,     
    which is scanned for and initialized during POST (NETBOOT.asm).         
    The boot server is implemented as a standalone Ada application.         
+
+   File listing:
+      BIOS.asm    - Core IBM 5150 PC BIOS firmware implementation
+      NETBOOT.asm - 8-Bit ISA bus compatible NIC driver expansion card
+      BootServer  - Ada boot server root
