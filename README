@@ -1,5 +1,5 @@
-              --- Yhi - A secure IBM 5150 BIOS implementation ---               
-                                                                                
+                      --- Yhi - IBM 5150 Enhancements ---                       
+
    This repository serves as a Proof of Concept (PoC) of porting several
    modern protocols / concepts to the original IBM PC.
 
