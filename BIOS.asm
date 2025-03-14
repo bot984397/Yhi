@@ -10,6 +10,9 @@
    ;-----------------------------------------------------------------------;
 
 [BITS 16]
+[ORG 0E000H]
+
+%define BIOS_SEG 0F000H
 
 %MACRO PROC 1
    %1:
@@ -21,13 +24,17 @@
    ;-----------------------------------------------------------------------;    
    ;                         CONSTANTS AND EQUATES                         ;                            
    ;-----------------------------------------------------------------------;
-SECTION .DATA
 
 %define ROM_SCAN_START  0C000H
 %define ROM_SCAN_END    0F000H
 %define ROM_SIGNATURE1  055H
 %define ROM_SIGNATURE2  0AAH
 %define ROM_SEGMENT_INC 080H
+
+BDA_SEG           EQU 0x0040
+struc BDA
+   .NETBOOT_PRESENT  RESB 1   
+endstruc
 
 PPI_PORT_A        EQU 60H
 PPI_PORT_B        EQU 61H
@@ -68,10 +75,6 @@ KBD_BUF_END       EQU KBD_BUF + 32        ; END OF KEYBOARD BUFFER
 
 YHI_BOOT_SECURE   EQU 01H                 ; ENABLE/DISABLE SECUREBOOT
 BIOS_SIGNATURE    EQU 0AAH                ; BIOS SIGNATURE
-
-NETBOOT_PRESENT   DB 00H
-
-SECTION .TEXT
 
    ;-----------------------------------------------------------------------;    
    ;                         SUBROUTINES - UTILITY                         ;                            
@@ -201,13 +204,13 @@ PROC SETUP_IVT
    XOR      AX,AX
    MOV      ES,AX
 
-   MOV      WORD[ES:10H*4], INT_10        ; INT 10H - VIDEO SERVICES
+   ;MOV      WORD[ES:10H*4], INT_10        ; INT 10H - VIDEO SERVICES
    MOV      WORD[ES:10H*4+2], 0F000H
-   MOV      WORD[ES:13H*4], INT_13        ; INT 13H - DISK SERVICES
+   ;MOV      WORD[ES:13H*4], INT_13        ; INT 13H - DISK SERVICES
    MOV      WORD[ES:13H*4+2], 0F000H
    MOV      WORD[ES:16H*4], INT_16        ; INT 16H - KEYBOARD SERVICES
    MOV      WORD[ES:16H*4+2], 0F000H
-   MOV      WORD[ES:18H*4], INT_18        ; INT 18H - ROM BASIC
+   ;MOV      WORD[ES:18H*4], INT_18        ; INT 18H - ROM BASIC
    MOV      WORD[ES:18H*4+2], 0F000H
    MOV      WORD[ES:19H*4], INT_19        ; INT 19H - BOOTSTRAP LOADER
    MOV      WORD[ES:19H*4+2], 0F000H
@@ -246,8 +249,6 @@ PROC START
    JC       ERR01
    SHL      AH,1
 
-   HLT
-
    CALL     YHI_CHECK_BOOT_KEYS           ; CHECK FOR SECUREBOOT / NETBOOT
    TEST     AL,AL                         ; (AL)=0 - NO SEQUENCE
    JE       NO_SEQUENCE
@@ -264,7 +265,6 @@ NETBOOT_SEQUENCE:
    JMP      NO_SEQUENCE
 NO_SEQUENCE:
 ERR01:
-   HLT
    JMP      ERR01
 ENDP START
 
@@ -487,15 +487,14 @@ ENDP INT_43
    ;-----------------------------------------------------------------------;    
    ;                         POWER-ON RESET VECTOR                         ;                            
    ;-----------------------------------------------------------------------; 
-   TIMES 01FF0H-($-$$) DB 0               ; PAD TO F000:FFF0
+   TIMES 1FF0H-($-$$) DB 0               ; PAD TO F000:FFF0
 
 RESET_VECTOR:
-   JMP      0F000H:START
+   JMP      BIOS_SEG:START
    DB       '03/09/25'
 
    ;-----------------------------------------------------------------------;    
    ;                             ROM SIGNATURE                             ;                                
    ;-----------------------------------------------------------------------;
-   TIMES 02000H-1-($-$$) DB 0             ; PAD TO F000:FFFF
+   TIMES 1FFFH-($-$$) DB 0             ; PAD TO F000:FFFF
    DB BIOS_SIGNATURE
-
