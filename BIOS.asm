@@ -12,7 +12,9 @@
 [BITS 16]
 [ORG 0E000H]
 
-%define BIOS_SEG 0F000H
+%define BIOS_SEG  0F000H
+%define STACK_SEG 00030H
+%define BDA_SEG   00040H
 
 %MACRO PROC 1
    %1:
@@ -31,9 +33,11 @@
 %define ROM_SIGNATURE2  0AAH
 %define ROM_SEGMENT_INC 080H
 
-BDA_SEG           EQU 0x0040
+;BDA_SEG           EQU 0x0040
 struc BDA
-   .NETBOOT_PRESENT  RESB 1   
+   .NETBOOT_PRESENT  RESB 1
+   .RESET_FLAG       RESW 1
+   .IO_RAM_SIZE      RESW 1
 endstruc
 
 PPI_PORT_A        EQU 60H
@@ -46,6 +50,12 @@ PIT_COUNTER_0     EQU 40H
 PIT_COUNTER_1     EQU 41H
 PIT_COUNTER_2     EQU 42H
 PI_CTRL           EQU 43H
+
+TIMER             EQU 40H
+TIMER_CTRL        EQU 43H
+TIMER_0           EQU 40H
+DMA_PORT_08       EQU 08H
+DMA               EQU 00H
    ;-----------------------------------------------------------------------;    
    ;                           KEYBOARD DATA AREA                          ;                             
    ;-----------------------------------------------------------------------;
@@ -79,6 +89,25 @@ BIOS_SIGNATURE    EQU 0AAH                ; BIOS SIGNATURE
    ;-----------------------------------------------------------------------;    
    ;                         SUBROUTINES - UTILITY                         ;                            
    ;-----------------------------------------------------------------------;
+
+   ;----- LOAD BIOS DATA AREA ---------------------------------------------;
+   ; THIS ROUTINE SETS UP (ES) to point to the BDA                         ;
+   ; INPUT                                                                 ;
+   ;     NO REGISTERS                                                      ;
+   ; OUTPUT                                                                ;
+   ;     (ES) SET TO BDA (BIOS DATA AREA)                                  ;
+   ;-----------------------------------------------------------------------;
+PROC LDBDA
+   PUSH     AX                            ; SAVE AX
+   MOV      AX,BDA_SEG                    ; LOAD BDA SEGMENT INTO AX
+   MOV      ES,AX                         ; LOAD BDA SEGMENT INTO ES
+   POP      AX                            ; RESTORE AX
+   RET                                    ; RETURN TO CALLER
+ENDP LDBDA
+
+PROC STGTST
+   RET
+ENDP STGTST
 
    ;----- CHECK BOOT KEYS -------------------------------------------------;
    ; THIS ROUTINE CHECKS IF KEY COMBINATIONS ARE PRESSED                   ;
@@ -178,7 +207,10 @@ ROM_SCAN_CHECKSUM_LOOP:
    CALL     FAR[ES:03H]                   ; FAR CALL TO ROM INIT FUNCTION
    CMP      AX,'BN'                       ; NETBOOT EXPANSION ROM
    JNE      ROM_SCAN_CONT                 ; NO? CONTINUE
-   MOV      BYTE[NETBOOT_PRESENT],01H     ; SET VARIABLE ACCORDINGLY
+   PUSH     ES
+   CALL     LDBDA                         ; LOAD BDA SEGMENT
+   MOV      BYTE[ES:BDA.NETBOOT_PRESENT],01H
+   POP      ES
 ROM_SCAN_CONT:
    POP      DS                            ; RESTORE REGISTERS AFTER FAR CALL
    POP      BP
@@ -224,30 +256,313 @@ ENDP SETUP_IVT
    ;                    RESET VECTOR - BIOS ENTRY POINT                    ;                       
    ;-----------------------------------------------------------------------;
 PROC START
+   ;----- INTEL 8088 PROCESSOR TESTS --------------------------------------;
+   ; VALIDATE 8088 FLAGS, REGISTERS AND CONDITIONAL BRANCHING              ;
+   ;-----------------------------------------------------------------------;
    CLI                                    ; DISABLE INTERRUPTS
-   MOV      AH,0D5H
-   SAHF
-   JNC      ERR01
-   JNZ      ERR01
-   JNP      ERR01
-   JNS      ERR01
-   LAHF
-   MOV      CL,5
-   SHR      AH,CL
-   JNC      ERR01
-   MOV      AL,40H
-   SHL      AL,1
-   JNO      ERR01
-   XOR      AH,AH
-   SAHF
-   JBE      ERR01
-   JS       ERR01
-   JP       ERR01
-   LAHF
-   MOV      CL,5
-   SHR      AH,CL
-   JC       ERR01
-   SHL      AH,1
+   MOV      AH,0D5H                       ; SET SF, CF, ZF, AF
+   SAHF                                   ; STORE AH INTO FLAGS
+   JNC      ERR01                         ; ERR IF CF CLEAR
+   JNZ      ERR01                         ; ERR IF ZF CLEAR
+   JNP      ERR01                         ; ERR IF PF CLEAR
+   JNS      ERR01                         ; ERR IF SF CLEAR
+   LAHF                                   ; LOAD FLAGS INTO AH
+   MOV      CL,5                          ; LOAD COUNTER WITH SHIFT COUNT
+   SHR      AH,CL                         ; SHIFT AH LEFT (CL) TIMES
+   JNC      ERR01                         ; ERR IF AF CLEAR
+   MOV      AL,40H                        ; SET OF FLAG
+   SHL      AL,1                          ; SHIFT AH LEFT BY 1
+   JNO      ERR01                         ; ERR IF OF CLEAR
+   XOR      AH,AH                         ; CLEAR AH
+   SAHF                                   ; STORE AH INTO FLAGS (CLEAR FLAGS)
+   JBE      ERR01                         ; ERR IF CF SET
+   JS       ERR01                         ; ERR IF SF SET
+   JP       ERR01                         ; ERR IF PF SET
+   LAHF                                   ; LOAD FLAGS INTO AH
+   MOV      CL,5                          ; LOAD COUNTER WITH SHIFT COUNT
+   SHR      AH,CL                         ; SHIFT AH RIGHT (CL) TIMES
+   JC       ERR01                         ; ERR IF CF SET
+   SHL      AH,1                          ; SHIFT AH LEFT BY 1
+   JO       ERR01                         ; ERR IF OF SET
+
+   MOV      AX,0FFFFH                     ; SET ALL AX BITS TO 1
+   STC                                    ; SET CARRY FLAG
+CPUTEST_1:
+   MOV      DS,AX                         ; LOAD AX INTO DS
+   MOV      BX,DS                         ; LOAD DS INTO BX
+   MOV      ES,BX                         ; LOAD BX INTO ES
+   MOV      CX,ES                         ; LOAD ES INTO CX
+   MOV      SS,CX                         ; LOAD CX INTO SS
+   MOV      DX,SS                         ; LOAD SS INTO DX
+   MOV      SP,DX                         ; LOAD DX INTO SP
+   MOV      BP,SP                         ; LOAD SP INTO BP
+   MOV      SI,BP                         ; LOAD BP INTO SI
+   MOV      DI,SI                         ; LOAD SI INTO DI
+   JNC      CPUTEST_2                     ; FINISH IF CARRY FLAG CLER
+   XOR      AX,DI                         ; DID 1 PATTERN MAKE IT THROUGH?
+   JNZ      ERR01                         ; NO? ERR
+   CLC                                    ; CLEAR CARRY FLAG
+   JMP      CPUTEST_1
+CPUTEST_2:
+   OR       AX,DI                         ; DID 0 PATTERN MAKE IT THROUGH?
+   JZ       DMATEST_1                     ; YES? CONTINUE
+ERR01:
+   HLT
+
+   ;----- INTEL 8237 DMA TESTS --------------------------------------------;
+   ; DISABLE THE 8237 DMA CONTROLLER.                                      ;
+   ; VALIDATE TIMER 1.                                                     ;
+   ; READ/WRITE CURRENT ADDRESS AND WORD COUNT FOR ALL CHANNELS.           ;
+   ; INITIALIZE AND START DMA CONTROLLER.                                  ;
+   ;-----------------------------------------------------------------------;
+DMATEST_1:
+   MOV      AL,04H                        ; DISABLE DMA CONTROLLER
+   OUT      DMA_PORT_08,AL
+   ;-----------------------------------------------------------------------;
+   ; VALIDATE TIMER 1                                                      ;
+   ;-----------------------------------------------------------------------;
+   MOV      AL,54H                        ; TIMER 1, LSB, MODE 2
+   OUT      TIMER+3,AL
+   MOV      AL,CL                         ; INITIAL TIMER COUNT TO 0
+   OUT      TIMER+1,AL
+TIMERTEST_1:
+   MOV      AL,40H                        ; LATCH TIMER 1 COUNT
+   OUT      TIMER+3,AL
+   CMP      BL,0FFH                       ; CHECK IF ALL BITS CLEAR
+   JE       TIMERTEST_2
+   IN       AL,TIMER+1                    ; READ TIMER 1 COUNT
+   OR       BL,AL                         ; SET ALL BITS IN TIMER
+   LOOP     TIMERTEST_1
+   HLT                                    ; TIMER 1 FAILURE, HALT
+TIMERTEST_2:
+   MOV      AL,BL                         ; SET TIMER 1 COUNT
+   SUB      CX,CX
+   OUT      TIMER+1,AL
+TIMERTEST_3:
+   MOV      AL,40H                        ; LATCH TIMER 1 COUNT
+   OUT      TIMER+3,AL
+   NOP                                    ; DELAY FOR TIMER
+   NOP
+   IN       AL,TIMER+1                    ; READ TIMER 1 COUNT
+   AND      BL,AL
+   JZ       TIMERTEST_4                   ; CONTINUE
+   LOOP     TIMERTEST_3
+   HLT                                    ; TIMER FAILURE, HALT
+   ;-----------------------------------------------------------------------;
+   ; INITIALIZE TIMER 1 TO REFRESH MEMORY                                  ;
+   ;-----------------------------------------------------------------------;
+TIMERTEST_4:
+   MOV      AL,18                         ; SET UP DIVISOR FOR REFRESH
+   OUT      TIMER+1,AL                    ; WRITE TIMER 1 COUNT REGISTER
+   OUT      DMA+0DH,AL                    ; SEND MASTER CLEAR TO DMA 
+   ;-----------------------------------------------------------------------;
+   ; WRAP DMA CHANNELS ADDR AND COUNT REGISTERS                            ;
+   ;-----------------------------------------------------------------------;
+   MOV      AL,0FFH                       ; WRITE FFH TO ALL REGISTERS
+DMATEST_2:
+   MOV      BL,AL                         ; SAVE PATTERN
+   MOV      BH,AL
+   MOV      CX,08H                        ; SET LOOP COUNTER
+   SUB      DX,DX                         ; SET UP REGISTER I/O PORT (0000H)
+DMATEST_3:
+   OUT      DX,AL                         ; WRITE PATTERN TO REGISTER, LSB
+   PUSH     AX
+   OUT      DX,AL                         ; MSB OF 16-BIT REGISTER
+   MOV      AX,0101H                      ; CLOBBER AX
+   IN       AL,DX                         ; READ LSB OF 16-BIT DMA REGISTER
+   MOV      AH,AL                         ; SAVE LSB
+   IN       AL,DX                         ; READ MSB OF 16-BIT DMA REGISTER
+   CMP      BX,AX                         ; WRITE/READ MATCH?
+   JE       DMATEST_4                     ; YES, CHECK NEXT REGISTER
+   HLT                                    ; NO, HALT
+DMATEST_4:
+   INC      DX                            ; SET I/O PORT TO NEXT REGISTER
+   LOOP     DMATEST_3                     ; WRITE PATTERN
+   INC      AL                            ; SET PATTERN TO 0
+   JZ       DMATEST_2                     ; WRITE TO CHANNEL REGISTERS 
+   ;-----------------------------------------------------------------------;
+   ; INITIALIZE AND START DMA CONTROLLER FOR MEMORY REFRESH                ;
+   ;-----------------------------------------------------------------------;
+   MOV      DS,BX                         ; LOAD ABS0 INTO DS AND ES
+   MOV      ES,BX
+   MOV      AL,0FFH                       ; SET COUNT OF 64K FOR DRAM REFRESH
+   OUT      DMA+1,AL
+   PUSH     AX
+   OUT      DMA+1,AL
+   MOV      DL,0BH                        ; (DX)=000B
+   MOV      AL,058H                       ; SET DMA MODE (CH0, READ, AUTOINT)
+   OUT      DX,AL                         ; WRITE DMA MODE REGISTER
+   MOV      AL,00H                        ; ENABLE DMA CONTROLLER
+   OUT      DMA+8,AL                      ; SET UP DMA COMMAND REGISTER
+   PUSH     AX
+   OUT      DMA+10,AL                     ; ENABLE CHANNEL 0 FOR REFRESH
+   MOV      CL,03H
+   MOV      AL,41H                        ; SET MODE FOR CHANNEL 1
+DMATEST_5:
+   OUT      DX,AL
+   INC      AL                            ; POINT TO NEXT CHANNEL
+   LOOP     DMATEST_5
+
+   ;-----------------------------------------------------------------------;
+   ; STORAGE TESTS (16K READ/WRITE).                                       ;
+   ; WRITE 0FFH, 055H, 0AAH, 001H, 000H TO FIRST 16K OF STORAGE.           ;
+   ; VALIDATE STORAGE ADDRESSABILITY.                                      ;
+   ;-----------------------------------------------------------------------;
+   MOV      DX,0213H                      ; ENABLE EXPANSION BOX
+   MOV      AL,01H
+   OUT      DX,AL
+   PUSH     ES                            ; PRESERVE ES
+   PUSH     AX                            ; PRESERVE AX
+   MOV      AX,BDA_SEG                    ; LOAD BDA SEGMENT
+   MOV      ES,AX
+   POP      AX                            ; RESTORE AX
+   MOV      BP,WORD[ES:BDA.RESET_FLAG]    ; LOAD RESET_FLAG VALUE
+   POP      ES                            ; RESTORE ES
+   CMP      BP,1234H                      ; WARM BOOT?
+   JE       STORAGETEST_2                 ; BYPASS STORAGE TESTS
+   MOV      SP,[STORAGETEST_1]
+   JMP      STGTST                        ; CALL STGTST ROUTINE
+STORAGETEST_1:
+   JE       STORAGETEST_2                 ; STGTST OK? PROCEED
+   HLT                                    ; ERR? HALT
+STORAGETEST_2:
+   SUB      DI,DI                         ; CLEAR DI
+   IN       AL,PPI_PORT_A                 ; DETERMINE BASE RAM SIZE
+   AND      AL,0CH                        ; ISOLATE RAM SIZE SWS
+   ADD      AL,04H                        ; CALCULATE MEMORY SIZE
+   MOV      CL,12
+   SHL      AX,CL
+   MOV      CX,AX
+   CLD                                    ; SET DIR FLAG TO INCREASE
+STORAGETEST_3:
+   STOSB                                  ; FILL BASE RAM WITH DATA
+   LOOP     STORAGETEST_3                 ; LOOP UNTIL ZERO
+   PUSH     ES                            ; PRESERVE ES
+   PUSH     AX                            ; PRESERVE AX
+   MOV      AX,BDA_SEG                    ; LOAD BDA SEGMENT
+   MOV      ES,AX
+   POP      AX                            ; RESTORE AX
+   MOV      WORD[ES:BDA.RESET_FLAG],BP    ; STORE BP BACK IN RESET_FLAG
+   POP      ES                            ; RESTORE ES 
+   ;-----------------------------------------------------------------------;
+   ; DETERMINE I/O CHANNEL RAM SIZE                                        ;
+   ;-----------------------------------------------------------------------;
+   MOV      AL,0F8H                       ; ENABLE SWITCH 5
+   OUT      PPI_PORT_B,AL
+   IN       AL,PPI_PORT_C                 ; READ SWITCHES
+   AND      AL,00000001B                  ; ISOLATE SWITCH 5
+   MOV      CL,12D
+   ROL      AX,CL
+   MOV      AL,0FCH                       ; DISABLE SW. 5
+   OUT      PPI_PORT_B,AL
+   IN       AL,PPI_PORT_C
+   AND      AL,0FH
+   OR       AL,AH                         ; COMBINE SWITCH VALUE
+   MOV      BL,AL                         ; SAVE SWITCH VALUE
+   MOV      AH,32
+   MUL      AH                            ; CALCULATE LENGTH
+   PUSH     ES                            ; PRESERVE ES
+   PUSH     AX                            ; PRESERVE AX
+   MOV      AX,BDA_SEG                    ; LOAD BDA SEGMENT
+   MOV      ES,AX
+   POP      AX                            ; RESTORE AX
+   MOV      WORD[ES:BDA.IO_RAM_SIZE],AX   ; SAVE I/O RAM SIZE
+   POP      ES                            ; RESTORE ES
+   JZ       STORAGETEST_5
+   MOV      DX,1000H                      ; SEGMENT FOR I/O RAM
+   MOV      AH,AL
+   MOV      AL,0
+STORAGETEST_4:
+   MOV      ES,DX                         ; LOAD I/O RAM SEGMENT
+   MOV      CX,8000H                      ; FILL 32K BYTES
+   SUB      DI,DI                         ; CLEAR DI
+   REP      STOSB
+   ADD      DX,800H                       ; NEXT SEGMENT VALUE
+   DEC      BL
+   JNZ      STORAGETEST_4
+   ;-----------------------------------------------------------------------;
+   ; INITIALIZE INTEL 8259 INTERRUPT CONTROLLER                            ;
+   ;-----------------------------------------------------------------------;
+STORAGETEST_5:
+   MOV      AL,13H                        ; ICW1 - EDGE, SNGL, ICW4
+   OUT      PIC_CMD,AL
+   MOV      AL,08H                        ; SET UP ICW2 - INT TYPE 8 (8 - F)
+   OUT      PIC_DATA,AL
+   MOV      AL,09H                        ; SET UP ICW4 - BUFFERED, 8086 MODE
+   OUT      PIC_DATA,AL
+   SUB      AX,AX                         ; POINT ES TO START OF R/W STORAGE
+   MOV      ES,AX 
+   ;-----------------------------------------------------------------------;
+   ; SET UP STACK SEGMENT AND STACK POINTER (SP)                           ;
+   ;-----------------------------------------------------------------------;
+   MOV      AX,STACK_SEG                  ; LOAD STACK SEGMENT ADDRESS
+   MOV      SS,AX                         ; LOAD SS WITH STACK SEGMENT
+   MOV      SP,256                        ; STACK POINTER TO TOP OF STACL
+   CMP      BP,1234H                      ; RESET FLAG SET?
+   JE       STACKTEST_2                   ; YES? SKIP MFG TESTS
+   SUB      DI,DI                         ; CLEAR DI
+   MOV      DS,DI                         ; CLEAR DS
+   MOV      BX,24H
+   MOV      WORD[BX],TEMP_INT             ; SET UP KB INTERRUPT
+   INC      BX
+   INC      BX
+   MOV      [BX],CS
+   CALL     KBD_RESET                     ; READ KB RESET CODE INTO BL
+   CMP      BL,065H                       ; MANUFACTURING TST 2?
+   JNZ      STACKTEST_2                   ; JUMP IF NOT
+   MOV      DL,255                        ; READ IN TST PROGRAM
+STACKTEST_1:
+   CALL     SP_TEST
+   MOV      AL,BL
+   STOSB
+   DEC      DL
+   JNZ      STACKTEST_1                   ; JUMP IF NOT DONE YET
+   INT      3EH                           ; INTERRUPT TYPE 62 ADDR F8H
+STACKTEST_2:
+   ;-----------------------------------------------------------------------;
+   ; SET UP BIOS INTERRUPT VECTOR TABLE                                    ;
+   ;-----------------------------------------------------------------------;
+   CALL     SETUP_IVT                     ; SET UP IVT
+   ;-----------------------------------------------------------------------;
+   ; INTEL 8259 INTERRUPT CONTROLLER TESTS                                 ;
+   ; READ/WRITE IMR WITH ALL 1s and 0s.                                    ;
+   ; ENABLE SYSTEM INTERRUPTS.                                             ;
+   ; MASK DEVICE INTERRUPTS OFF.                                           ;
+   ; CHECK FOR UNEXPECTED HOT INTERRUPTS.                                  ;
+   ;-----------------------------------------------------------------------;
+   MOV      DX,0021H                      ; INTERRUPT CHIP ADDR 21H
+   MOV      AL,0                          ; SET IMR TO ZERO
+   OUT      DX,AL
+   IN       AL,DX                         ; READ IMR
+   OR       AL,AL                         ; IMR=0?
+   JNZ      INTTEST_3                     ; NO? ERR ROUTINE
+   MOV      AL,0FFH                       ; DISABLE DEVICE INTERRUPTS
+   OUT      DX,AL
+   IN       AL,DX                         ; READ IMR
+   ADD      AL,1                          ; ALL IMR BITS SET?
+   JNZ      INTTEST_3                     ; NO? ERR ROUTINE
+   XOR      AH,AH                         ; CLEAR AH
+   STI                                    ; ENABLE EXTERNAL INTERRUPTS
+   SUB      CX,CX                         ; WAIT 1SEC FOR ANY INTS
+INTTEST_1:
+   LOOP     INTTEST_1
+INTTEST_2:
+   LOOP     INTTEST_2
+   OR       AH,AH                         ; DID ANY INTS OCCUR?
+   JZ       TIMERTEST_5                   ; NO? PROCEED
+INTTEST_3:
+   MOV      DX,101H                       ; BEEP IF ERR
+   CALL     ERR_BEEP                      ; CALL BEEP SUBROUTINE
+   CLI                                    ; DISABLE INTERRUPTS
+   HLT                                    ; HALT
+
+   ;-----------------------------------------------------------------------;
+   ; INTEL 8253 TIMER CHECKOUT                                             ;
+   ; VERIFY THAT THE SYSTEM TIMER (0) DOESN'T COUNT TOO FAST OR SLOW.      ;
+   ;-----------------------------------------------------------------------;
+TIMERTEST_5:
+   MOV      AL,0FEH                       ; MASK ALL INTS EXCEPT LVL 0
+   OUT      DX,AL                         ; WRITE TO 8253 IMR
 
    CALL     YHI_CHECK_BOOT_KEYS           ; CHECK FOR SECUREBOOT / NETBOOT
    TEST     AL,AL                         ; (AL)=0 - NO SEQUENCE
@@ -264,8 +579,7 @@ NETBOOT_SEQUENCE:
    ;CALL     NETBOOT_INTERFACE
    JMP      NO_SEQUENCE
 NO_SEQUENCE:
-ERR01:
-   JMP      ERR01
+   JMP      NO_SEQUENCE
 ENDP START
 
    ;----- INT 11 ----------------------------------------------------------;
